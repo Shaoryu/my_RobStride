@@ -157,3 +157,22 @@ float RobStride::getPosition() { return _fb_p; }
 float RobStride::getVelocity() { return _fb_v; }
 float RobStride::getTorque() { return _fb_t; }
 float RobStride::getTemperature() { return _fb_temp; }
+
+bool RobStride::handle_message(const CANMessage &msg){
+    uint8_t type = (msg.id >> 24) & 0x1F;
+    uint8_t src_id = (msg.id >> 8) & 0xFF;
+
+    if (msg.format == CANExtended && type == CMD_FEEDBACK && src_id == _motor_id) {
+        uint16_t p_int = (msg.data[0] << 8) | msg.data[1];
+        uint16_t v_int = (msg.data[2] << 8) | msg.data[3];
+        uint16_t t_int = (msg.data[4] << 8) | msg.data[5];
+        uint16_t temp_int = (msg.data[6] << 8) | msg.data[7];
+
+        _fb_p = uint_to_float(p_int, P_MIN, P_MAX, 16);
+        _fb_v = uint_to_float(v_int, V_MIN, V_MAX, 16);
+        _fb_t = uint_to_float(t_int, T_MIN, T_MAX, 16);
+        _fb_temp = (float)temp_int / 10.0f;
+        return true;
+    }
+    return false;
+}

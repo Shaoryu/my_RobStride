@@ -8,7 +8,7 @@
 #define ROBSTRIDE_H
 
 #include "mbed.h"
-
+#include "CANManager.h"
 // 物理パラメータ制限
 #define P_MIN -12.57f
 #define P_MAX 12.57f
@@ -40,7 +40,7 @@ enum RunMode {
     MODE_CSP       = 5
 };
 
-class RobStride {
+class RobStride :public CANReceiver{
 public:
     RobStride(CAN &can, uint8_t motor_id, uint8_t master_id = 0x00);
 
@@ -77,8 +77,11 @@ public:
     void sendParam(uint16_t index, float value);
     void sendParam(uint16_t index, uint8_t value);
 
+    virtual bool handle_message(const CANMessage &msg) override;
+
 private:
     CAN &_can;
+    CANMessage rcv_msg;
     uint8_t _motor_id;
     uint8_t _master_id;
 
