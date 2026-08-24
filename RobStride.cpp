@@ -131,7 +131,7 @@ void RobStride::setMaxSpeedPP(float speed) { sendParam(IDX_VEL_MAX, speed); }
 void RobStride::setAccelerationPP(float acc) { sendParam(IDX_ACC_SET, acc); }
 // ---------------
 
-int RobStride::update() {
+int RobStride::update() {//そんなに使わない
     CANMessage msg;
     int return_can = _can.read(msg);
     if (return_can) {
@@ -147,7 +147,7 @@ int RobStride::update() {
             _fb_p = uint_to_float(p_int, P_MIN, P_MAX, 16);
             _fb_v = uint_to_float(v_int, V_MIN, V_MAX, 16);
             _fb_t = uint_to_float(t_int, T_MIN, T_MAX, 16);
-            _fb_temp = (float)temp_int / 10.0f;
+            _fb_temp = static_cast<float>(temp_int / 10.0f);
         }
     }
     return return_can;
@@ -171,7 +171,7 @@ bool RobStride::handle_message(const CANMessage &msg){
         _fb_p = uint_to_float(p_int, P_MIN, P_MAX, 16);
         _fb_v = uint_to_float(v_int, V_MIN, V_MAX, 16);
         _fb_t = uint_to_float(t_int, T_MIN, T_MAX, 16);
-        _fb_temp = (float)temp_int / 10.0f;
+        _fb_temp = static_cast<float>(temp_int / 10.0f);
         return true;
     }
     return false;
