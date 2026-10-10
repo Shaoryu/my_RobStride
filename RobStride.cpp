@@ -489,6 +489,7 @@ void RobStride::setAngleLimits(float min_rad, float max_rad, bool enable) {
 
 bool RobStride::is_arrived(float tolerance_rad) {
     CriticalSectionLock lock;
+    if (!_is_first_rx) return false;
     float current = _accumulated_angle - _origin_offset;
     float target = _target_angle;
     return std::fabs(target - current) <= tolerance_rad;
