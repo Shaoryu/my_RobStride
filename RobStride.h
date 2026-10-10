@@ -7,6 +7,10 @@
 #include <cmath>
 #include <chrono>
 
+#ifdef M_PI
+#define M_PI 3.1415926535
+#endif
+
 // 物理パラメータ制限 (-4π ~ 4π)
 #define P_MIN (-4.0f * (float)M_PI)
 #define P_MAX (4.0f * (float)M_PI)
