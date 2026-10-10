@@ -7,8 +7,10 @@ RobStride::RobStride(CAN &can, uint8_t motor_id, uint8_t master_id, osPriority_t
       _master_id(master_id),
       _thread(priority, stack_size),
       _has_new_msg(false),
-      _last_rx_time_ms(0),
+      _last_rx_time(),
+      _has_received_any(false),
       _tx_fail_count(0),
+      _current_run_mode(RunMode::OPERATION),
       _is_first_rx(false),
       _last_raw_angle(0.0f),
       _accumulated_angle(0.0f),
@@ -69,7 +71,7 @@ float RobStride::uint_to_float(int x_int, float x_min, float x_max, int bits) {
     return ((float)x_int * span / ((float)((1 << bits) - 1))) + offset;
 }
 
-// 割り込みコンテキスト(ISR)から安全に呼ばれる軽量ハンドラ
+// 割り込みコンテキスト(ISR)安全: バッファ保存とフラグ通知のみ
 bool RobStride::handle_message(const CANMessage &msg) {
     if (msg.format != CANExtended) return false;
 
@@ -85,7 +87,6 @@ bool RobStride::handle_message(const CANMessage &msg) {
             CriticalSectionLock lock;
             _rx_buffer = msg;
             _has_new_msg = true;
-            _last_rx_time_ms = Kernel::get_ms_count();
         }
         _event_flags.set(0x01);
         return true;
@@ -106,6 +107,8 @@ void RobStride::control_loop() {
                 msg = _rx_buffer;
                 _has_new_msg = false;
                 has_data = true;
+                _last_rx_time = Kernel::Clock::now();
+                _has_received_any = true;
             }
         }
 
@@ -131,11 +134,12 @@ void RobStride::control_loop() {
             float cur_pos = 0.0f;
             float target_pos = 0.0f;
             float kp, ki, kd, max_v, damping;
+            RunMode cur_run_mode;
 
             {
                 CriticalSectionLock lock;
 
-                // 累積角度計算
+                // 累積角度計算 (-4π ~ 4π 跨ぎ判定)
                 if (!_is_first_rx) {
                     _origin_offset = cur_raw_p;
                     _last_raw_angle = cur_raw_p;
@@ -162,7 +166,6 @@ void RobStride::control_loop() {
                 _fb_temp = cur_temp;
                 _mode_state = mode;
 
-                // タイプ2の6bit故障フラグ反映
                 _fault_status.under_volt     = (fault_bits >> 0) & 1;
                 _fault_status.c_phase_oc     = (fault_bits >> 1) & 1;
                 _fault_status.over_temp      = (fault_bits >> 2) & 1;
@@ -182,37 +185,38 @@ void RobStride::control_loop() {
                 kd = _pos_kd;
                 max_v = _max_output_spd;
                 damping = _damping_kd;
+                cur_run_mode = _current_run_mode;
             }
 
-            // dt計算 (Timer elapsed_time)
-            float dt = std::chrono::duration<float>(_pid_timer.elapsed_time()).count();
-            _pid_timer.reset();
-            if (dt <= 0.0f || dt > 0.05f) {
-                dt = 0.001f;
-                _pos_integral = 0.0f;
-                _pos_prev_err = 0.0f;
+            // Mbed側で運控モード(MODE_OPERATION)として動作している場合のみPID計算・送信
+            if (cur_run_mode == RunMode::OPERATION) {
+                float dt = std::chrono::duration<float>(_pid_timer.elapsed_time()).count();
+                _pid_timer.reset();
+                if (dt <= 0.0f || dt > 0.05f) {
+                    dt = 0.001f;
+                    _pos_integral = 0.0f;
+                    _pos_prev_err = 0.0f;
+                }
+
+                float err = target_pos - cur_pos;
+                _pos_integral += (err + _pos_prev_err) * dt * 0.5f;
+                if (ki > 0.0f) {
+                    float i_lim = max_v / ki;
+                    if (_pos_integral > i_lim) _pos_integral = i_lim;
+                    else if (_pos_integral < -i_lim) _pos_integral = -i_lim;
+                }
+                float deriv = (err - _pos_prev_err) / dt;
+                _pos_prev_err = err;
+
+                float out_spd = (kp * err) + (ki * _pos_integral) + (kd * deriv);
+                if (out_spd > max_v) out_spd = max_v;
+                else if (out_spd < -max_v) out_spd = -max_v;
+
+                sendMotionCommand(0.0f, 0.0f, out_spd, 0.0f, damping);
             }
-
-            // 位置PID計算
-            float err = target_pos - cur_pos;
-            _pos_integral += (err + _pos_prev_err) * dt * 0.5f;
-            if (ki > 0.0f) {
-                float i_lim = max_v / ki;
-                if (_pos_integral > i_lim) _pos_integral = i_lim;
-                else if (_pos_integral < -i_lim) _pos_integral = -i_lim;
-            }
-            float deriv = (err - _pos_prev_err) / dt;
-            _pos_prev_err = err;
-
-            float out_spd = (kp * err) + (ki * _pos_integral) + (kd * deriv);
-            if (out_spd > max_v) out_spd = max_v;
-            else if (out_spd < -max_v) out_spd = -max_v;
-
-            // タイプ1送信 (Velocity制御: p_set=0, Kp=0, v_set=PID出力, Kd=damping, t_ff=0)
-            sendMotionCommand(0.0f, 0.0f, out_spd, 0.0f, damping);
 
         } else if (type == CMD_READ_PARAM) {
-            // タイプ17応答: リトルエンディアン
+            // タイプ17: リトルエンディアン
             uint16_t index = (uint16_t)msg.data[0] | ((uint16_t)msg.data[1] << 8);
             uint32_t val = (uint32_t)msg.data[4] |
                            ((uint32_t)msg.data[5] << 8) |
@@ -221,7 +225,7 @@ void RobStride::control_loop() {
             update_param_cache(index, val);
 
         } else if (type == CMD_FAULT_FB) {
-            // タイプ21: リトルエンディアン (Byte0~3: fault)
+            // タイプ21: リトルエンディアン
             uint32_t fault_raw = (uint32_t)msg.data[0] |
                                  ((uint32_t)msg.data[1] << 8) |
                                  ((uint32_t)msg.data[2] << 16) |
@@ -292,16 +296,68 @@ void RobStride::clearFault() {
     msg.id = (CMD_DISABLE << 24) | (_master_id << 8) | _motor_id;
     msg.len = 8;
     memset(msg.data, 0, 8);
-    msg.data[0] = 1; // 故障解除
+    msg.data[0] = 1;
     write_can_retry(msg);
 }
 
-void RobStride::setCanTimeout(uint32_t timeout_val) {
-    sendParam((uint16_t)0x7028, timeout_val);
+void RobStride::setRunMode(RunMode mode) {
+    {
+        CriticalSectionLock lock;
+        _current_run_mode = mode;
+    }
+    sendParam((uint16_t)IDX_RUN_MODE, static_cast<uint8_t>(mode));
 }
 
-void RobStride::setRunMode(RunMode mode) {
-    sendParam((uint16_t)0x7005, (uint8_t)mode);
+RunMode RobStride::getRunMode() {
+    CriticalSectionLock lock;
+    return _current_run_mode;
+}
+
+// PP modeのみ実行可能
+void RobStride::setPosition(float position_rad) {
+    {
+        CriticalSectionLock lock;
+        if (_current_run_mode != RunMode::PP) return;
+    }
+    sendParam((uint16_t)IDX_LOC_REF, position_rad);
+}
+
+// Velocity modeのみ実行可能
+void RobStride::setVelocity(float velocity_rad_s) {
+    {
+        CriticalSectionLock lock;
+        if (_current_run_mode != RunMode::VELOCITY) return;
+    }
+    sendParam((uint16_t)IDX_SPD_REF, velocity_rad_s);
+}
+
+// Current modeのみ実行可能
+void RobStride::setCurrent(float current_a) {
+    {
+        CriticalSectionLock lock;
+        if (_current_run_mode != RunMode::CURRENT) return;
+    }
+    sendParam((uint16_t)IDX_IQ_REF, current_a);
+}
+
+void RobStride::setCurrentLimit(float current_limit_a) {
+    sendParam((uint16_t)IDX_LIMIT_CUR, current_limit_a);
+}
+
+void RobStride::setAcceleration(float acc_rad_s2) {
+    sendParam((uint16_t)IDX_ACC_RAD, acc_rad_s2);
+}
+
+void RobStride::setMaxSpeedPP(float speed_rad_s) {
+    sendParam((uint16_t)IDX_VEL_MAX, speed_rad_s);
+}
+
+void RobStride::setAccelerationPP(float acc_rad_s2) {
+    sendParam((uint16_t)IDX_ACC_SET, acc_rad_s2);
+}
+
+void RobStride::setCanTimeout(uint32_t timeout_val) {
+    sendParam((uint16_t)IDX_CAN_TIMEOUT, timeout_val);
 }
 
 // タイプ18: リトルエンディアン
@@ -484,11 +540,10 @@ bool RobStride::has_error() {
 }
 
 bool RobStride::isTimeout(uint32_t timeout_ms) {
-    uint64_t now = Kernel::get_ms_count();
     CriticalSectionLock lock;
-    uint64_t last = _last_rx_time_ms;
-    if (last == 0) return true;
-    return (now - last) > timeout_ms;
+    if (!_has_received_any) return true;
+    auto elapsed = Kernel::Clock::now() - _last_rx_time;
+    return std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() > timeout_ms;
 }
 
 uint32_t RobStride::getTxRetryFailures() {
@@ -499,4 +554,10 @@ uint32_t RobStride::getTxRetryFailures() {
 MotorFaultStatus RobStride::getFaultStatus() {
     CriticalSectionLock lock;
     return _fault_status;
+}
+
+void RobStride::setLimitTorque(float torque_nm) {
+    if (torque_nm < 0.0f) torque_nm = 0.0f;
+    if (torque_nm > T_MAX) torque_nm = T_MAX;
+    sendParam((uint16_t)IDX_LIMIT_TORQ, torque_nm);
 }

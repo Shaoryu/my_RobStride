@@ -40,14 +40,6 @@ public:
     // 加速度 (0x7025)
     void setAccelerationPP_all(float acc_rad_s2) { for (RobStride &r : _robstride) r.setAccelerationPP(acc_rad_s2); }
 
-    int update_all() {
-        int status = 0;
-        for (RobStride &r : _robstride) {
-            // 戻り値がエラーフラグ等であることを想定し、ビットORで全モータのステータスをまとめる
-            status |= r.update(); 
-        }
-        return status;
-    }
 
     // --- 一括取得メソッド ---
     // ※ 呼び出し側でモータ数分（motor_num）の要素を持つ配列を用意してポインタを渡す想定
@@ -95,7 +87,6 @@ public:
     // 加速度 (0x7025)
     void setAccelerationPP(float acc_rad_s2, uint8_t node_zerobase) { _robstride[node_zerobase].setAccelerationPP(acc_rad_s2); }
     
-    int update(uint8_t node_zerobase) { return _robstride[node_zerobase].update(); }
 
     float getPosition(uint8_t node_zerobase) { return _robstride[node_zerobase].getPosition(); }
     float getVelocity(uint8_t node_zerobase) { return _robstride[node_zerobase].getVelocity(); }

@@ -7,10 +7,9 @@
 #include <cmath>
 #include <chrono>
 
-#ifdef M_PI
+#ifndef M_PI
 #define M_PI 3.1415926535
 #endif
-
 // 物理パラメータ制限 (-4π ~ 4π)
 #define P_MIN (-4.0f * (float)M_PI)
 #define P_MAX (4.0f * (float)M_PI)
@@ -22,6 +21,19 @@
 #define KD_MAX 5.0f
 #define T_MIN -6.0f
 #define T_MAX 6.0f
+
+// パラメータインデックス (RobStride Manual)
+#define IDX_RUN_MODE   0x7005
+#define IDX_IQ_REF     0x7006 // 電流モード目標値 (-11 ~ 11A)
+#define IDX_SPD_REF    0x700A // 速度モード目標値 (-50 ~ 50rad/s)
+#define IDX_LIMIT_TORQ 0x700B // トルク制限
+#define IDX_LOC_REF    0x7016 // 位置モード目標値 (rad)
+#define IDX_LIMIT_SPD  0x7017 // 位置モード最大速度
+#define IDX_LIMIT_CUR  0x7018 // 速度・位置モード電流制限
+#define IDX_ACC_RAD    0x7022 // 速度モード加速度
+#define IDX_VEL_MAX    0x7024 // PPモード 最大速度
+#define IDX_ACC_SET    0x7025 // PPモード 加速度
+#define IDX_CAN_TIMEOUT 0x7028 // CANタイムアウト値
 
 // 通信タイプ
 enum CommType : uint8_t {
@@ -37,13 +49,13 @@ enum CommType : uint8_t {
     CMD_FAULT_FB     = 0x15
 };
 
-// 実行モード (0x7005)
-enum RunMode : uint8_t {
-    MODE_OPERATION = 0,
-    MODE_PP        = 1,
-    MODE_VELOCITY  = 2,
-    MODE_CURRENT   = 3,
-    MODE_CSP       = 5
+// 実行モード
+enum class RunMode : uint8_t {
+    OPERATION = 0,
+    PP        = 1,
+    VELOCITY  = 2,
+    CURRENT   = 3,
+    CSP       = 5
 };
 
 // タイプ2および21の障害フラグ
@@ -82,9 +94,22 @@ public:
     void setZero();
     void clearFault();
 
-    // パラメータ書き込み (Type 18)
+    // モード設定および各モード専用指令（モードチェックガード付き）
     void setRunMode(RunMode mode);
-    void setCanTimeout(uint32_t timeout_val); // 20000 = 1s (0x7028)
+    RunMode getRunMode();
+    void setPosition(float position_rad);     // PPモードのみ実行可能
+    void setVelocity(float velocity_rad_s);   // VELOCITYモードのみ実行可能
+    void setCurrent(float current_a);         // CURRENTモードのみ実行可能
+
+    // 制限・プロファイル設定
+    void setCurrentLimit(float current_limit_a); // 速度・位置モード電流制限 (0x7018)
+    void setAcceleration(float acc_rad_s2);      // 速度モード加速度 (0x7022)
+    void setMaxSpeedPP(float speed_rad_s);       // PPモード最大速度 (0x7024)
+    void setAccelerationPP(float acc_rad_s2);    // PPモード加速度 (0x7025)
+    void setCanTimeout(uint32_t timeout_val);    // 20000 = 1s (0x7028)
+    void setLimitTorque(float torque_nm);        // 運控モード等のトルク制限 0~6Nm (0x700B)
+
+    // 汎用パラメータ書き込み (Type 18)
     void sendParam(uint16_t index, float value);
     void sendParam(uint16_t index, uint8_t value);
     void sendParam(uint16_t index, uint16_t value);
@@ -95,10 +120,10 @@ public:
     bool getParamCache(uint16_t index, float &value);
     bool getParamCache(uint16_t index, uint32_t &value);
 
-    // 位置PIDゲイン設定
+    // Mbed側位置PIDゲイン設定（運控モード用）
     void setPositionGains(float kp, float ki, float kd, float max_speed_rad_s, float damping_kd = 1.0f);
 
-    // 目標角度設定・リミット
+    // Mbed側目標累積角度設定・リミット
     void setTargetAngle(float angle_rad);
     void setTargetAngleDeg(float angle_deg);
     void setAngleLimits(float min_rad, float max_rad, bool enable = true);
@@ -142,12 +167,16 @@ private:
     CANMessage _rx_buffer;
     bool _has_new_msg;
 
-    // 時間管理
+    // 時間管理 (Chrono)
     Timer _pid_timer;
-    uint64_t _last_rx_time_ms;
+    rtos::Kernel::Clock::time_point _last_rx_time;
+    bool _has_received_any;
 
     // CAN送信リトライ失敗数
     uint32_t _tx_fail_count;
+
+    // モータ運転モード追跡
+    RunMode _current_run_mode;
 
     // 累積角度計算
     bool _is_first_rx;
@@ -163,7 +192,7 @@ private:
     uint8_t _mode_state;
     MotorFaultStatus _fault_status;
 
-    // 位置PID制御
+    // Mbed側位置PID制御
     float _target_angle;
     float _pos_kp;
     float _pos_ki;
