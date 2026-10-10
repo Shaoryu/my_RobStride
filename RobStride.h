@@ -1,17 +1,15 @@
-/**
- * RobStride.h
- * RobStride 05 (EL05) Motor Library for Mbed (Extended CAN ID Version)
- * Modified for Velocity Mode limits
- */
-
 #ifndef ROBSTRIDE_H
 #define ROBSTRIDE_H
 
 #include "mbed.h"
 #include "CANManager.h"
-// 物理パラメータ制限
-#define P_MIN -12.57f
-#define P_MAX 12.57f
+#include "platform/CriticalSectionLock.h"
+#include <cmath>
+#include <chrono>
+
+// 物理パラメータ制限 (-4π ~ 4π)
+#define P_MIN (-4.0f * (float)M_PI)
+#define P_MAX (4.0f * (float)M_PI)
 #define V_MIN -50.0f
 #define V_MAX 50.0f
 #define KP_MIN 0.0f
@@ -22,72 +20,174 @@
 #define T_MAX 6.0f
 
 // 通信タイプ
-enum CommType {
-    CMD_MOTION_CTRL = 0x01,
-    CMD_FEEDBACK    = 0x02,
-    CMD_ENABLE      = 0x03,
-    CMD_DISABLE     = 0x04,
-    CMD_SET_ZERO    = 0x06,
-    CMD_WRITE_PARAM = 0x12
+enum CommType : uint8_t {
+    CMD_GET_ID       = 0x00,
+    CMD_MOTION_CTRL  = 0x01,
+    CMD_FEEDBACK     = 0x02,
+    CMD_ENABLE       = 0x03,
+    CMD_DISABLE      = 0x04,
+    CMD_SET_ZERO     = 0x06,
+    CMD_SET_CAN_ID   = 0x07,
+    CMD_READ_PARAM   = 0x11,
+    CMD_WRITE_PARAM  = 0x12,
+    CMD_FAULT_FB     = 0x15
 };
 
-// 実行モード
-enum RunMode {
+// 実行モード (0x7005)
+enum RunMode : uint8_t {
     MODE_OPERATION = 0,
-    MODE_POSITION  = 1,
+    MODE_PP        = 1,
     MODE_VELOCITY  = 2,
     MODE_CURRENT   = 3,
     MODE_CSP       = 5
 };
 
-class RobStride :public CANReceiver{
-public:
-    RobStride(CAN &can, uint8_t motor_id, uint8_t master_id = 0x00);
+// タイプ2および21の障害フラグ
+union MotorFaultStatus {
+    uint32_t raw;
+    struct __attribute__((packed)) {
+        uint32_t over_temp      : 1; // bit0: 過熱
+        uint32_t drv_fault      : 1; // bit1: ドライバ異常
+        uint32_t under_volt     : 1; // bit2: 低電圧
+        uint32_t over_volt      : 1; // bit3: 過電圧
+        uint32_t b_phase_oc     : 1; // bit4: B相過電流
+        uint32_t c_phase_oc     : 1; // bit5: C相過電流
+        uint32_t reserved1      : 1; // bit6
+        uint32_t uncalibrated   : 1; // bit7: 未校正
+        uint32_t hw_id_fault    : 1; // bit8: ハード識別異常
+        uint32_t pos_init_fault : 1; // bit9: 位置初期化異常
+        uint32_t reserved2      : 4; // bit10-13
+        uint32_t stall_overload : 1; // bit14: 脱調/過負荷
+        uint32_t reserved3      : 1; // bit15
+        uint32_t a_phase_oc     : 1; // bit16: A相過電流
+        uint32_t reserved4      : 15;
+    };
+};
 
+class RobStride : public CANReceiver {
+public:
+    RobStride(CAN &can, uint8_t motor_id, uint8_t master_id = 0xFD,
+              osPriority_t priority = osPriorityAboveNormal, uint32_t stack_size = 2048);
+    virtual ~RobStride() = default;
+
+    void start();
+
+    // 基本動作制御
     void enable();
     void disable();
     void setZero();
+    void clearFault();
 
-    // MIT Mode
-    void sendMotionCommand(float torque, float position, float velocity, float kp, float kd);
-
-    // パラメータ設定 (Type 18)
+    // パラメータ書き込み (Type 18)
     void setRunMode(RunMode mode);
-    void setPosition(float position_rad);
-    void setVelocity(float velocity_rads);
-    void setCurrent(float current_a);
+    void setCanTimeout(uint32_t timeout_val); // 20000 = 1s (0x7028)
+    void sendParam(uint16_t index, float value);
+    void sendParam(uint16_t index, uint8_t value);
+    void sendParam(uint16_t index, uint16_t value);
+    void sendParam(uint16_t index, uint32_t value);
 
-    // --- 追加修正箇所: 制限設定 ---
-    void setCurrentLimit(float current_limit_a); // 最大電流設定
-    void setAcceleration(float acc_rad_s2);      // 加速度設定
-    // ---------------------------
-    // PPモード用設定 (位置制御)
-    void setMaxSpeedPP(float speed_rad_s);      // 移動速度制限 (0x7024)
-    void setAccelerationPP(float acc_rad_s2);   // 加速度 (0x7025)
-    
+    // 非同期パラメータ読み取り (Type 17)
+    void requestParam(uint16_t index);
+    bool getParamCache(uint16_t index, float &value);
+    bool getParamCache(uint16_t index, uint32_t &value);
 
-    int update();
+    // 位置PIDゲイン設定
+    void setPositionGains(float kp, float ki, float kd, float max_speed_rad_s, float damping_kd = 1.0f);
 
-    float getPosition();
+    // 目標角度設定・リミット
+    void setTargetAngle(float angle_rad);
+    void setTargetAngleDeg(float angle_deg);
+    void setAngleLimits(float min_rad, float max_rad, bool enable = true);
+
+    // 到達判定
+    bool is_arrived(float tolerance_rad = 0.05f);
+
+    // 原点オフセット操作
+    void setOriginOffset(float offset_rad);
+    float getInitialOffset();
+
+    // 状態取得
+    float getPosition();     // オフセット適用後の累積ラジアン
+    float getRawAngle();     // 生角度 (-4π ~ 4π)
     float getVelocity();
     float getTorque();
     float getTemperature();
+    bool isMotorMode();
+    bool has_error();
+    bool isTimeout(uint32_t timeout_ms = 500);
+    uint32_t getTxRetryFailures();
 
-    // 汎用パラメータ送信 (publicに公開)
-    void sendParam(uint16_t index, float value);
-    void sendParam(uint16_t index, uint8_t value);
+    MotorFaultStatus getFaultStatus();
 
+    // 運控モード生送信
+    void sendMotionCommand(float torque, float position, float velocity, float kp, float kd);
+
+    // 割り込み受信ハンドラ (ISRセーフ)
     virtual bool handle_message(const CANMessage &msg) override;
 
 private:
     CAN &_can;
-    CANMessage rcv_msg;
     uint8_t _motor_id;
     uint8_t _master_id;
 
-    float _fb_p, _fb_v, _fb_t, _fb_temp;
+    // RTOSスレッド・フラグ
+    rtos::Thread _thread;
+    rtos::EventFlags _event_flags;
 
-    int float_to_uint(float x, float x_min, float x_max, int bits);
-    float uint_to_float(int x_int, float x_min, float x_max, int bits);
+    // 受信バッファ (handle_message用)
+    CANMessage _rx_buffer;
+    bool _has_new_msg;
+
+    // 時間管理
+    Timer _pid_timer;
+    uint64_t _last_rx_time_ms;
+
+    // CAN送信リトライ失敗数
+    uint32_t _tx_fail_count;
+
+    // 累積角度計算
+    bool _is_first_rx;
+    float _last_raw_angle;
+    float _accumulated_angle;
+    float _origin_offset;
+
+    // フィードバックステータス
+    float _fb_raw_angle;
+    float _fb_v;
+    float _fb_t;
+    float _fb_temp;
+    uint8_t _mode_state;
+    MotorFaultStatus _fault_status;
+
+    // 位置PID制御
+    float _target_angle;
+    float _pos_kp;
+    float _pos_ki;
+    float _pos_kd;
+    float _pos_integral;
+    float _pos_prev_err;
+    float _max_output_spd;
+    float _damping_kd;
+
+    // ソフトウェアリミット
+    bool _limit_enabled;
+    float _limit_min_rad;
+    float _limit_max_rad;
+
+    // パラメータキャッシュ
+    static constexpr size_t CACHE_SIZE = 16;
+    struct ParamCache {
+        uint16_t index;
+        uint32_t raw_val;
+        bool valid;
+    } _param_caches[CACHE_SIZE];
+
+    void control_loop();
+    bool write_can_retry(const CANMessage &msg);
+    void update_param_cache(uint16_t index, uint32_t val);
+
+    static int float_to_uint(float x, float x_min, float x_max, int bits);
+    static float uint_to_float(int x_int, float x_min, float x_max, int bits);
 };
-#endif
+
+#endif // ROBSTRIDE_H
