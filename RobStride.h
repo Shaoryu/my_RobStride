@@ -129,10 +129,16 @@ public:
     // Mbed側位置PIDゲイン設定（運控モード用）
     void setPositionGains(float kp, float ki, float kd, float max_speed_rad_s, float damping_kd = 1.0f);
 
+    // 停止・現在位置保持
+    void stop();
+
     // Mbed側目標累積角度設定・リミット
     void setTargetAngle(float angle_rad);
     void setTargetAngleDeg(float angle_deg);
     void setAngleLimits(float min_rad, float max_rad, bool enable = true);
+    void setAngleLimitsDeg(float min_deg, float max_deg, bool enable = true);
+    void getAngleLimits(float &min_rad, float &max_rad);
+    void getAngleLimitsDeg(float &min_deg, float &max_deg);
 
     // 到達判定
     bool is_arrived(float tolerance_rad = 0.05f);
@@ -143,9 +149,13 @@ public:
 
     // 状態取得
     float getPosition();     // オフセット適用後の累積ラジアン
+    float getPositionDeg();  // オフセット適用後の累積度数 [deg]
+    float getTargetAngle();
+    float getTargetAngleDeg();
     float getRawAngle();     // 生角度 (-4π ~ 4π)
     float getVelocity();
     float getTorque();
+    float getLimitTorque();
     float getTemperature();
     bool isMotorMode();
     bool has_error();
@@ -212,6 +222,7 @@ private:
     bool _limit_enabled;
     float _limit_min_rad;
     float _limit_max_rad;
+    float _limit_torque;
 
     // パラメータキャッシュ
     static constexpr size_t CACHE_SIZE = 16;

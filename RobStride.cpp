@@ -30,7 +30,8 @@ RobStride::RobStride(CAN &can, uint8_t motor_id, uint8_t master_id, osPriority_t
       _damping_kd(1.0f),
       _limit_enabled(false),
       _limit_min_rad(0.0f),
-      _limit_max_rad(0.0f) {
+      _limit_max_rad(0.0f),
+      _limit_torque(T_MAX) {
 
     _fault_status.raw = 0;
     for (size_t i = 0; i < CACHE_SIZE; ++i) {
@@ -143,7 +144,7 @@ void RobStride::control_loop() {
                 if (!_is_first_rx) {
                     _origin_offset = cur_raw_p;
                     _last_raw_angle = cur_raw_p;
-                    _accumulated_angle = 0.0f;
+                    _accumulated_angle = cur_raw_p;
                     _is_first_rx = true;
                 } else {
                     float diff = cur_raw_p - _last_raw_angle;
@@ -239,7 +240,13 @@ void RobStride::control_loop() {
 void RobStride::sendMotionCommand(float torque, float position, float velocity, float kp, float kd) {
     CANMessage msg;
     msg.format = CANExtended;
-    msg.len = 8;
+    float max_t = T_MAX;
+    {
+        CriticalSectionLock lock;
+        max_t = _limit_torque;
+    }
+    if (torque > max_t) torque = max_t;
+    else if (torque < -max_t) torque = -max_t;
 
     uint16_t t_int  = float_to_uint(torque, T_MIN, T_MAX, 16);
     uint16_t p_int  = float_to_uint(position, P_MIN, P_MAX, 16);
@@ -560,5 +567,52 @@ MotorFaultStatus RobStride::getFaultStatus() {
 void RobStride::setLimitTorque(float torque_nm) {
     if (torque_nm < 0.0f) torque_nm = 0.0f;
     if (torque_nm > T_MAX) torque_nm = T_MAX;
+    {
+        CriticalSectionLock lock;
+        _limit_torque = torque_nm;
+    }
     sendParam((uint16_t)IDX_LIMIT_TORQ, torque_nm);
+}
+
+float RobStride::getLimitTorque() {
+    CriticalSectionLock lock;
+    return _limit_torque;
+}
+
+void RobStride::stop() {
+    CriticalSectionLock lock;
+    if (_is_first_rx) {
+        _target_angle = _accumulated_angle - _origin_offset;
+    }
+    _pos_integral = 0.0f;
+    _pos_prev_err = 0.0f;
+}
+
+float RobStride::getPositionDeg() {
+    return getPosition() * (180.0f / (float)M_PI);
+}
+
+float RobStride::getTargetAngle() {
+    CriticalSectionLock lock;
+    return _target_angle;
+}
+
+float RobStride::getTargetAngleDeg() {
+    return getTargetAngle() * (180.0f / (float)M_PI);
+}
+
+void RobStride::setAngleLimitsDeg(float min_deg, float max_deg, bool enable) {
+    setAngleLimits(min_deg * ((float)M_PI / 180.0f), max_deg * ((float)M_PI / 180.0f), enable);
+}
+
+void RobStride::getAngleLimits(float &min_rad, float &max_rad) {
+    CriticalSectionLock lock;
+    min_rad = _limit_min_rad;
+    max_rad = _limit_max_rad;
+}
+
+void RobStride::getAngleLimitsDeg(float &min_deg, float &max_deg) {
+    CriticalSectionLock lock;
+    min_deg = _limit_min_rad * (180.0f / (float)M_PI);
+    max_deg = _limit_max_rad * (180.0f / (float)M_PI);
 }
