@@ -58,6 +58,12 @@ enum class RunMode : uint8_t {
     CSP       = 5
 };
 
+constexpr RunMode MODE_OPERATION = RunMode::OPERATION;
+constexpr RunMode MODE_POSITION  = RunMode::PP;
+constexpr RunMode MODE_VELOCITY  = RunMode::VELOCITY;
+constexpr RunMode MODE_CURRENT   = RunMode::CURRENT;
+constexpr RunMode MODE_CSP       = RunMode::CSP;
+
 // タイプ2および21の障害フラグ
 union MotorFaultStatus {
     uint32_t raw;
